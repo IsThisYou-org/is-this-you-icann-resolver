@@ -1,9 +1,12 @@
-#! /bin/bash
+#! /bin/sh
 
-cd "$(dirname "$0")"
-mkdir -p data
-exec docker run --rm -it --read-only \
-	--name is-this-you-icann-resolver \
-	-p 53:53/tcp -p 53:53/udp \
-	-v "$(pwd)/data:/opt/data" \
-	"$(cat list)"
+me=6
+
+docker run -it --read-only \
+	--ulimit nofile=8192:8192 \
+	-e SYSLOG_STDOUT=Y \
+	-v /opt/data/is-this-you-icann-resolver:/opt/data/ \
+	-p 127.0.0.${me}:53:53/udp -p 127.0.0.${me}:53:53 \
+	-p 192.168.1.14${me}:53:53/udp -p 192.168.1.14${me}:53:53 \
+	-p 9167:9167 \
+	is-this-you-icann-resolver $*
