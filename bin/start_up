@@ -1,4 +1,9 @@
 #! /bin/sh
 
 mkdir -p /opt/data/logs || exec sleep 30
+
+mkdir -p /opt/data/unbound
+cp /usr/share/dnssec-root/trusted-key.key /opt/data/unbound/
+chown -R unbound: /opt/data/unbound
+
 exec /sbin/init

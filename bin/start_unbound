@@ -1,9 +1,14 @@
 #! /bin/sh
 
-if ! /usr/sbin/unbound-checkconf /usr/local/etc/unbound.conf
+tmp=$(mktemp)
+if ! /usr/sbin/unbound-checkconf /usr/local/etc/unbound.conf > ${tmp} 2>&1
 	then
-		echo "unbound-checkconf failed"
+		logger -t start_unbound < ${tmp}
+		logger -t start_unbound "unbound-checkconf failed"
+		rm -f ${tmp}
 		exec sleep 30
 	fi
+
+rm -f ${tmp}
 
 exec /usr/sbin/unbound -d -c /usr/local/etc/unbound.conf
