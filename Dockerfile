@@ -1,4 +1,4 @@
-FROM golang:alpine AS builder
+FROM golang:1.27.4-alpine3.24 AS builder
 RUN CGO_ENABLED=0 go install github.com/letsencrypt/unbound_exporter@v0.6.0
 
 FROM alpine:3.24
