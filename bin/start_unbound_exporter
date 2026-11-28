@@ -1,0 +1,5 @@
+#! /bin/sh
+
+exec /usr/local/bin/unbound_exporter \
+	-unbound.ca "" -unbound.cert "" \
+	-unbound.host "unix:///opt/data/unbound/unbound.ctl"
