@@ -131,6 +131,31 @@ run_rec_tcp() {
 	return 1
 }
 
+# One attempt and a two-second cap, so a silent server cannot sit in the
+# default dig timeout (5s x 2 tries).
+dig_rec_short() {
+	dig @"${DNS_HOST}" -p "${DNS_PORT}" \
+		+time=2 +tries=1 \
+		+rec +notcp +dnssec +adflag \
+		+nocmd +nostats \
+		"$@"
+}
+
+run_rec_short() {
+	if DIG_OUT=$(dig_rec_short "$@" 2>&1)
+	then
+		return 0
+	fi
+	return 1
+}
+
+# True when DIG_OUT is NOERROR and has at least one answer.
+rec_short_has_answer() {
+	_st=$(dig_header_status "${DIG_OUT}")
+	_ans=$(dig_count_field ANSWER "${DIG_OUT}")
+	test "${_st}" = "NOERROR" && test "${_ans:-0}" -gt 0
+}
+
 dig_header_status() {
 	printf '%s\n' "$1" | awk '
 		/status:/ {
@@ -283,13 +308,22 @@ else
 fi
 
 # Wait until a recursive query answers, so a freshly started stack can
-# finish its root AXFR before the checks run.
+# finish its root AXFR before the checks run. Elapsed time is wall-clock:
+# a dig that uses its full timeout must not count as two seconds.
 if test "${WAIT_FOR_ZONE}" -gt 0
 then
 	printf 'QA    waiting up to %ss for the resolver to answer\n' "${WAIT_FOR_ZONE}"
+	_wait_start=$(date +%s)
 	_elapsed=0
-	while test "${_elapsed}" -lt "${WAIT_FOR_ZONE}"
+	while true
 	do
+		_now=$(date +%s)
+		_elapsed=$((_now - _wait_start))
+		if test "${_elapsed}" -ge "${WAIT_FOR_ZONE}"
+		then
+			printf 'QA    wait timed out after %ss\n' "${_elapsed}"
+			break
+		fi
 		if run_rec google.com A
 		then
 			_st=$(dig_header_status "${DIG_OUT}")
@@ -301,13 +335,29 @@ then
 			fi
 		fi
 		sleep 2
-		_elapsed=$((_elapsed + 2))
 	done
-	if test "${_elapsed}" -ge "${WAIT_FOR_ZONE}"
+fi
+
+# One short query after the wait. If the resolver is silent, stop here
+# instead of letting every later check burn a full dig timeout.
+run_rec_short google.com A || true
+if rec_short_has_answer
+then
+	pass "short probe rd=1 google.com A is NOERROR with ${_ans} answer(s)"
+else
+	fail "short probe rd=1 google.com A got no answer (status=${_st:-empty} answer=${_ans:-0}); +time=2 +tries=1"
+	if resolve_container
 	then
-		printf 'QA    wait timed out after %ss (continuing with the checks)\n' \
-			"${WAIT_FOR_ZONE}"
+		printf 'QA    docker logs %s\n' "${CONTAINER}"
+		docker logs "${CONTAINER}" 2>&1 || true
+		printf 'QA    docker exec %s ps\n' "${CONTAINER}"
+		dexec sh -c 'ps w 2>/dev/null || ps' 2>&1 || true
+	else
+		printf 'QA    no container available for logs or ps\n'
 	fi
+	printf '\nQA    %s passed, %s failed, %s skipped\n' \
+		"${passed}" "${failed}" "${skipped}"
+	exit 1
 fi
 
 # ---------------------------------------------------------------------------
@@ -461,8 +511,10 @@ else
 	fail "+dnssec ${_name} A: AD flag not set (flags: '${_flags}'); DNSSEC validation may be broken"
 fi
 
-# dnssec-failed.org is published with a broken chain.
-run_rec dnssec-failed.org A || true
+# dnssec-failed.org is published with a broken chain. A validating
+# resolver must return SERVFAIL. The short timeout keeps a silent
+# server from hanging this check.
+run_rec_short dnssec-failed.org A || true
 _st=$(dig_header_status "${DIG_OUT}")
 if test "${_st}" = "SERVFAIL"
 then

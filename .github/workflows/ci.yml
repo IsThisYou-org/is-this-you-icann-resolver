@@ -24,7 +24,7 @@ on:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -59,6 +59,7 @@ jobs:
             is-this-you-icann-resolver:ci
 
       - name: Run QA against the container
+        timeout-minutes: 8
         env:
           DNS_HOST: 127.0.0.1
           DNS_PORT: "53"
@@ -72,5 +73,5 @@ jobs:
           ./qa.sh
 
       - name: Container logs on failure
-        if: failure()
+        if: failure() || cancelled()
         run: docker logs is-this-you-icann-resolver || true
