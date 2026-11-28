@@ -2,7 +2,7 @@
 
 if test "${SYSLOG_SERVER}"
 	then
-		exec /sbin/syslogd -n -R ${SYSLOG_SERVER}
+		exec /sbin/syslogd -n -R "${SYSLOG_SERVER}"
 	fi
 
 if test "${SYSLOG_STDOUT}" = "Y"

@@ -1,25 +1,26 @@
 # is-this-you-icann-resolver
 
-Local copy of the ICANN DNS root, served by Unbound. The image name is `jamesstevens/is-this-you-icann-resolver`.
+Local copy of the ICANN DNS root, used by Unbound as an RFC 8806 local root. The image name is `jamesstevens/is-this-you-icann-resolver`.
 
-Unbound from Alpine 3.24 holds `.` as an `auth-zone`. It transfers the zone from the ICANN transfer servers `192.0.32.132` (`xfr.lax.dns.icann.org`) and `192.0.47.132` (`xfr.cjr.dns.icann.org`), and from `c.root-servers.net` (`192.33.4.12`) and `f.root-servers.net` (`192.5.5.241`). The transfer is checked with `zonemd-check: yes`. A zone whose ZONEMD digest does not match is not served. `for-downstream: yes` and `for-upstream: yes` publish that copy to clients and to Unbound's own lookups. DNSSEC validation uses the root trust anchor shipped in the image, `/usr/share/dnssec-root/trusted-key.key`.
+Unbound from Alpine 3.24 holds `.` as an `auth-zone`. It transfers the zone from the ICANN transfer servers `192.0.32.132` (`xfr.lax.dns.icann.org`) and `192.0.47.132` (`xfr.cjr.dns.icann.org`), and from `c.root-servers.net` (`192.33.4.12`) and `f.root-servers.net` (`192.5.5.241`). The transfer is checked with `zonemd-check: yes` and `zonemd-reject-absence: yes`. A zone whose ZONEMD digest does not match, or that has no ZONEMD, is not served. `for-upstream: yes`, `for-downstream: no` and `fallback-enabled: yes` mean Unbound uses that copy for its own lookups and falls back to ordinary recursion if the local zone cannot answer. It does not serve the zone authoritatively to clients.
 
-The container speaks DNS only. It does not terminate TLS, and it does not serve DNS-over-HTTPS. Logging is syslog only.
+DNSSEC validation uses the root trust anchor shipped in the image, `/usr/share/dnssec-root/trusted-key.key`. At start-up `start_up` copies that file into the chroot as `/opt/data/unbound/trusted-key.key`. Unbound itself runs as the `unbound` user, chrooted to `/opt/data/unbound`. The zone file is `/opt/data/unbound/root.zone`.
 
-## `rd=0` answers with `AA=1`
+The container speaks DNS on port 53. It does not terminate TLS, and it does not serve DNS-over-HTTPS. Logging is syslog only. Let's Encrypt `unbound_exporter` v0.6.0 listens on port 9167 and scrapes Unbound over a Unix control socket at `/opt/data/unbound/unbound.ctl`. Unbound is configured with `control-use-cert: no`, so that socket does not require a client certificate.
 
-A query with the recursion-desired bit clear (`rd=0`) for data in the root zone is answered from that copy, with the authoritative-answer bit set (`AA=1`). That includes the root SOA and the delegation data published in the root, such as `com. DS`.
+## Recursion and `rd=0`
+
+Ordinary client queries should have the recursion-desired bit set (`rd=1`). Unbound resolves them using the local root for the first hop:
 
 ```
-dig @127.0.0.1 +norec . SOA
-dig @127.0.0.1 +norec com. DS
+dig @127.0.0.1 +rec +dnssec +adflag google.com A
 ```
 
-Those responses carry `flags: qr aa` and an answer section, once the zone has loaded.
+Access control on the private ranges is `allow_snoop`, so a query with `rd=0` can return data already in the cache. Because `for-downstream` is `no`, Unbound does not serve the auth-zone to clients, and those `rd=0` answers are not authoritative (`AA=1`) from this copy of the root. An `rd=0` query for something that is not cached is typically REFUSED.
 
-A query for a name below a delegation is a referral from this copy of the root. The AA bit is clear on that referral. With `for-downstream: yes`, Unbound does not chase the delegation for an `rd=0` query.
-
-`for-downstream: no` makes the same `rd=0` queries REFUSED, with no AA bit. That option stays `yes`.
+```
+dig @127.0.0.1 +norec +dnssec +adflag com. NS
+```
 
 ## Used by the `icann` mode of is-this-you-resolver
 
@@ -33,8 +34,9 @@ This repository builds the image. It does not push it.
 | --- | --- |
 | `53/udp` | DNS |
 | `53/tcp` | DNS, including the zone transfer Unbound makes outbound |
+| `9167/tcp` | Prometheus metrics from `unbound_exporter` |
 
-Nothing else is published. There is no TLS listener.
+There is no TLS listener.
 
 Unbound accepts queries from `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12` and `192.168.0.0/16`. Every other source is refused. A normal Docker bridge address falls inside `172.16.0.0/12`, so publishing port 53 to the host works. IPv6 is off.
 
@@ -47,43 +49,77 @@ Unbound accepts queries from `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12` and `1
 
 When neither is set, `syslogd` appends `/opt/data/logs/messages`, with nine rotations of 100000 bytes.
 
+## File descriptors
+
+Unbound tries to raise its own file-descriptor limit at start-up. In a container that is not permitted, so the limit has to be set from the outside. Use at least 8192, or Unbound logs a `setrlimit: Operation not permitted` warning and runs with fewer UDP ports.
+
+Docker run:
+
+```
+docker run --ulimit nofile=8192:8192 ...
+```
+
+Compose, on the service (not at the top level):
+
+```
+ulimits:
+  nofile:
+    soft: 8192
+    hard: 8192
+```
+
+`./dkrun` already passes `--ulimit nofile=8192:8192`.
+
 ## Run
 
-The root filesystem is read-only. `/run` and `/tmp` point at `/dev/shm`. The zone file and the log directory need a writable mount on `/opt/data`. Unbound stores the zone at `/opt/data/root.zone`.
+The root filesystem is read-only. `/run` and `/tmp` point at `/dev/shm`. The chroot, zone file, control socket and log directory need a writable mount on `/opt/data`. Unbound stores the zone at `/opt/data/unbound/root.zone`.
 
 ```bash
 mkdir -p data
 docker run --rm --read-only \
   --name is-this-you-icann-resolver \
+  --ulimit nofile=8192:8192 \
   -p 53:53/tcp -p 53:53/udp \
+  -p 127.0.0.1:9167:9167 \
   -v "$(pwd)/data:/opt/data" \
   jamesstevens/is-this-you-icann-resolver
 ```
 
-`./dkrun` does the same. It reads the image name from `list` and mounts `./data` on `/opt/data`.
+`./dkrun` is the lab wrapper: the same ulimit, `SYSLOG_STDOUT=Y`, DNS on `127.0.0.6` and `192.168.1.146`, and metrics on `9167`. It runs the image `is-this-you-icann-resolver` and mounts `/opt/data/is-this-you-icann-resolver` on `/opt/data`. It does not set `--name`.
 
 To watch logs on the console instead of the file:
 
 ```bash
 docker run --rm --read-only \
   --name is-this-you-icann-resolver \
+  --ulimit nofile=8192:8192 \
   -e SYSLOG_STDOUT=Y \
   -p 53:53/tcp -p 53:53/udp \
+  -p 127.0.0.1:9167:9167 \
   -v "$(pwd)/data:/opt/data" \
   jamesstevens/is-this-you-icann-resolver
 ```
 
-The entry point is `/usr/local/bin/start_up`. It creates `/opt/data/logs` and then execs `/sbin/init`. `/etc/inittab` respawns `start_syslogd` and `start_unbound`. Each of those scripts ends in `exec`. If start-up fails (`unbound-checkconf`, or the log directory cannot be created), the script runs `exec sleep 30` so init can respawn it.
+The entry point is `/usr/local/bin/start_up`. It creates `/opt/data/logs` and `/opt/data/unbound`, copies the trust anchor into the chroot, sets ownership to `unbound`, and then execs `/sbin/init`. `/etc/inittab` respawns `start_syslogd`, `start_unbound` and `start_unbound_exporter`. Each of those scripts ends in `exec`. If start-up fails (`unbound-checkconf`, or the log directory cannot be created), the script runs `exec sleep 30` so init can respawn it.
 
-The host needs outbound DNS to the four transfer addresses above. Until the zone is loaded, authoritative answers are not available.
+The host needs outbound DNS to the four transfer addresses above. Until the zone is loaded, lookups that need the root use the fallback path rather than the local copy.
 
 ## Build
 
-`./dkmk` writes the build stamp, builds the image named in `list`, and removes the stamp from the work tree:
+`./dkmk` writes the build stamp and builds the image named in `list`:
 
 ```bash
 date +%Y%m%d.%H%M > build.txt
 docker image build -t "$(cat list)" .
 ```
 
-`build.txt` is copied into the image as `/usr/local/etc/build.txt`. It is listed in `.gitignore`. Do not commit it. `./dkmk` does not push the image.
+The builder stage is `golang:1.27.4-alpine3.24` and installs Let's Encrypt `unbound_exporter` v0.6.0 as a static binary. `build.txt` is copied into the image as `/usr/local/etc/build.txt`. It is listed in `.gitignore`. Do not commit it. `./dkmk` does not push the image.
+
+## QA
+
+`./qa.sh` probes a running container. It does not build, start or push anything. `dig` (BIND) is required.
+
+```bash
+./qa.sh
+DNS_HOST=127.0.0.6 ./qa.sh
+```

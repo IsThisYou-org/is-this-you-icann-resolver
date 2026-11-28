@@ -1,0 +1,78 @@
+# Proposed GitHub Actions workflow for is-this-you-icann-resolver.
+# Default branch is master. There is currently no CI in the repository;
+# this file is intended to be added as .github/workflows/ci.yml together
+# with qa.sh at the repository root.
+#
+# The job builds the image (creating build.txt first), runs shellcheck
+# on bin/*, starts the container with --ulimit nofile=8192:8192, then
+# runs ./qa.sh. GitHub-hosted runners have internet, so the script's
+# recursive and DNSSEC checks are included. They are the tests a
+# network-isolated agent could not run: live root AXFR / ZONEMD, an
+# rd=1 google.com answer (this is what would catch the referral bug),
+# an RRSIG on com SOA, SERVFAIL for dnssec-failed.org or rhybar.cz,
+# and the rd=0 behaviour.
+#
+# This workflow does not push images and does not publish to Docker Hub.
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck bind9-dnsutils curl
+
+      - name: Shellcheck
+        run: |
+          shellcheck bin/*
+          shellcheck qa.sh
+
+      - name: Create build stamp and build image
+        run: |
+          date +%Y%m%d.%H%M > build.txt
+          docker build -t is-this-you-icann-resolver:ci .
+
+      - name: Start container
+        run: |
+          mkdir -p data
+          docker run -d --name is-this-you-icann-resolver \
+            --read-only \
+            --ulimit nofile=8192:8192 \
+            -e SYSLOG_STDOUT=Y \
+            -v "$PWD/data:/opt/data" \
+            -p 127.0.0.1:53:53/tcp \
+            -p 127.0.0.1:53:53/udp \
+            -p 127.0.0.1:9167:9167 \
+            is-this-you-icann-resolver:ci
+
+      - name: Run QA against the container
+        timeout-minutes: 8
+        env:
+          DNS_HOST: 127.0.0.1
+          DNS_PORT: "53"
+          METRICS_HOST: 127.0.0.1
+          METRICS_PORT: "9167"
+          CONTAINER_NAME: is-this-you-icann-resolver
+          WAIT_FOR_ZONE: "180"
+          SKIP_DOH: "1"
+        run: |
+          chmod +x qa.sh
+          ./qa.sh
+
+      - name: Container logs on failure
+        if: failure() || cancelled()
+        run: docker logs is-this-you-icann-resolver || true
