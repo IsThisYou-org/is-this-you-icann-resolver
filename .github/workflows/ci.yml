@@ -9,7 +9,8 @@
 # recursive and DNSSEC checks are included. They are the tests a
 # network-isolated agent could not run: live root AXFR / ZONEMD, an
 # rd=1 google.com answer (this is what would catch the referral bug),
-# the AD flag, SERVFAIL for dnssec-failed.org, and the rd=0 behaviour.
+# an RRSIG on com SOA, SERVFAIL for dnssec-failed.org or rhybar.cz,
+# and the rd=0 behaviour.
 #
 # This workflow does not push images and does not publish to Docker Hub.
 

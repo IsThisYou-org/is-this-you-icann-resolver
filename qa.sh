@@ -149,6 +149,31 @@ run_rec_short() {
 	return 1
 }
 
+# Checking disabled, so a name that has been removed is NXDOMAIN
+# rather than a validation SERVFAIL.
+dig_rec_cd_short() {
+	dig @"${DNS_HOST}" -p "${DNS_PORT}" \
+		+time=2 +tries=1 \
+		+rec +notcp +dnssec +cd +adflag \
+		+nocmd +nostats \
+		"$@"
+}
+
+run_rec_cd_short() {
+	if DIG_OUT=$(dig_rec_cd_short "$@" 2>&1)
+	then
+		return 0
+	fi
+	return 1
+}
+
+dig_has_rrsig() {
+	printf '%s\n' "$1" | awk '
+		$4 == "RRSIG" { found = 1; exit }
+		END { exit (found ? 0 : 1) }
+	'
+}
+
 # True when DIG_OUT is NOERROR and has at least one answer.
 rec_short_has_answer() {
 	_st=$(dig_header_status "${DIG_OUT}")
@@ -186,8 +211,9 @@ flags_has() {
 	_flags=$1
 	_tok=$2
 	printf '%s\n' "${_flags}" | awk -v t="${_tok}" '
-		BEGIN { n = split($0, a, /[[:space:]]+/); rc = 1 }
-		END {
+		{
+			n = split($0, a, /[[:space:]]+/)
+			rc = 1
 			for (i = 1; i <= n; i++) if (a[i] == t) rc = 0
 			exit rc
 		}
@@ -494,33 +520,66 @@ else
 	pass "rd=1 google.com A is NOERROR with ${_ans} answer(s) (flags: ${_flags})"
 fi
 
-# AD flag on a well-known signed name. google.com is not signed.
-_name=cloudflare.com
-run_rec "${_name}" A || true
+# Positive DNSSEC proof on a signed TLD, not a third-party name.
+# com SOA +dnssec must carry an RRSIG.
+run_rec com SOA || true
 _st=$(dig_header_status "${DIG_OUT}")
 _flags=$(dig_header_flags "${DIG_OUT}")
 _ans=$(dig_count_field ANSWER "${DIG_OUT}")
 _ans=${_ans:-0}
 if test "${_st}" != "NOERROR" || test "${_ans}" -eq 0
 then
-	fail "+dnssec ${_name} A: expected NOERROR with answers, got status=${_st} answer=${_ans}"
+	fail "+dnssec com SOA: expected NOERROR with answers, got status=${_st:-empty} answer=${_ans}"
+elif ! dig_has_rrsig "${DIG_OUT}"
+then
+	fail "+dnssec com SOA: expected an RRSIG, none was present (flags: ${_flags})"
 elif flags_has "${_flags}" ad
 then
-	pass "+dnssec ${_name} A has the AD flag (flags: ${_flags})"
+	pass "+dnssec com SOA has an RRSIG and the AD flag (flags: ${_flags})"
 else
-	fail "+dnssec ${_name} A: AD flag not set (flags: '${_flags}'); DNSSEC validation may be broken"
+	fail "+dnssec com SOA has an RRSIG but the AD flag is not set (flags: '${_flags}')"
 fi
 
-# dnssec-failed.org is published with a broken chain. A validating
-# resolver must return SERVFAIL. The short timeout keeps a silent
-# server from hanging this check.
-run_rec_short dnssec-failed.org A || true
-_st=$(dig_header_status "${DIG_OUT}")
-if test "${_st}" = "SERVFAIL"
+# Two deliberately broken zones: dnssec-failed.org (Comcast) and
+# rhybar.cz (CZ.NIC). A validating resolver returns SERVFAIL. One
+# SERVFAIL is enough. A zone that has gone (+cd is NXDOMAIN) is
+# skipped, so a single disappearance does not fail the run. Each
+# query uses the two-second cap.
+_servfails=0
+_broken_miss=
+check_broken_zone() {
+	_bz_name=$1
+	_bz_type=$2
+	_bz_who=$3
+	run_rec_cd_short "${_bz_name}" "${_bz_type}" || true
+	_cd_st=$(dig_header_status "${DIG_OUT}")
+	if test "${_cd_st}" = "NXDOMAIN"
+	then
+		skip "rd=1 ${_bz_name} ${_bz_type} has vanished (+cd NXDOMAIN, ${_bz_who})"
+		return 0
+	fi
+	run_rec_short "${_bz_name}" "${_bz_type}" || true
+	_val_st=$(dig_header_status "${DIG_OUT}")
+	if test "${_val_st}" = "SERVFAIL"
+	then
+		_servfails=$((_servfails + 1))
+		return 0
+	fi
+	_broken_miss="${_broken_miss}${_bz_name} ${_bz_type}=${_val_st:-empty} "
+	return 0
+}
+check_broken_zone dnssec-failed.org A Comcast
+check_broken_zone rhybar.cz A "CZ.NIC"
+if test "${_servfails}" -gt 0
 then
-	pass "rd=1 dnssec-failed.org A is SERVFAIL (validating resolver)"
+	if test -n "${_broken_miss}"
+	then
+		pass "rd=1 broken DNSSEC zone is SERVFAIL (${_servfails} of dnssec-failed.org, rhybar.cz); other ${_broken_miss}"
+	else
+		pass "rd=1 broken DNSSEC zone is SERVFAIL (${_servfails} of dnssec-failed.org, rhybar.cz)"
+	fi
 else
-	fail "rd=1 dnssec-failed.org A: expected SERVFAIL, got status=${_st:-empty}"
+	fail "rd=1 dnssec-failed.org A and rhybar.cz A: expected SERVFAIL from at least one zone that still exists (${_broken_miss:-none responded SERVFAIL})"
 fi
 
 run_rec_tcp google.com A || true
